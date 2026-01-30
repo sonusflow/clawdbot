@@ -88,8 +88,8 @@ import { detectAndLoadPromptImages } from "./images.js";
 
 /**
  * Estimate current context window usage percentage from the session file.
- * This reads the session JSONL to sum up token usage from all assistant messages,
- * then calculates the percentage based on the model's context window.
+ * Uses the input tokens from the LAST assistant message, which represents
+ * the full context sent to the model for that turn (system prompt + history).
  *
  * @param sessionFile - Path to the session JSONL file
  * @param contextWindowTokens - The model's context window size in tokens
@@ -105,7 +105,9 @@ export async function estimateContextPercent(
     const content = await fs.readFile(sessionFile, "utf8").catch(() => null);
     if (!content) return undefined;
 
-    let totalTokens = 0;
+    // Find the last assistant message with usage info
+    let lastInputTokens = 0;
+    let lastOutputTokens = 0;
     for (const line of content.split("\n")) {
       if (!line.trim()) continue;
       try {
@@ -114,7 +116,7 @@ export async function estimateContextPercent(
         if (entry?.type === "message" && entry?.message?.role === "assistant") {
           const usage = entry.message.usage;
           if (usage) {
-            // Sum input + output tokens (input represents context sent to model)
+            // Get input tokens (represents full context sent to model for this turn)
             const input =
               usage.input ?? usage.inputTokens ?? usage.input_tokens ?? usage.promptTokens ?? 0;
             const output =
@@ -123,7 +125,10 @@ export async function estimateContextPercent(
               usage.output_tokens ??
               usage.completionTokens ??
               0;
-            totalTokens += (input > 0 ? input : 0) + (output > 0 ? output : 0);
+            if (input > 0) {
+              lastInputTokens = input;
+              lastOutputTokens = output > 0 ? output : 0;
+            }
           }
         }
       } catch {
@@ -131,9 +136,11 @@ export async function estimateContextPercent(
       }
     }
 
-    if (totalTokens <= 0) return undefined;
+    if (lastInputTokens <= 0) return undefined;
 
-    const percent = (totalTokens / contextWindowTokens) * 100;
+    // Current context = last input + last output (what will be sent next turn)
+    const currentContextTokens = lastInputTokens + lastOutputTokens;
+    const percent = (currentContextTokens / contextWindowTokens) * 100;
     return Math.min(100, Math.max(0, Math.round(percent)));
   } catch {
     return undefined;

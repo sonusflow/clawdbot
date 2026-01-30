@@ -158,6 +158,8 @@ export function buildAgentSystemPrompt(params: {
     channel?: string;
     capabilities?: string[];
     repoRoot?: string;
+    /** Context window usage percentage (0-100). Shows how much of the context window is used. */
+    contextPercent?: number;
   };
   messageToolHints?: string[];
   sandboxInfo?: {
@@ -563,11 +565,19 @@ export function buildRuntimeLine(
     model?: string;
     defaultModel?: string;
     repoRoot?: string;
+    contextPercent?: number;
   },
   runtimeChannel?: string,
   runtimeCapabilities: string[] = [],
   defaultThinkLevel?: ThinkLevel,
 ): string {
+  // Format context percentage (clamp to 0-999, handle NaN/Infinity)
+  const contextPct = runtimeInfo?.contextPercent;
+  const contextStr =
+    contextPct !== undefined && Number.isFinite(contextPct)
+      ? `context=${Math.max(0, Math.min(999, Math.round(contextPct)))}%`
+      : "";
+
   return `Runtime: ${[
     runtimeInfo?.agentId ? `agent=${runtimeInfo.agentId}` : "",
     runtimeInfo?.host ? `host=${runtimeInfo.host}` : "",
@@ -580,6 +590,7 @@ export function buildRuntimeLine(
     runtimeInfo?.node ? `node=${runtimeInfo.node}` : "",
     runtimeInfo?.model ? `model=${runtimeInfo.model}` : "",
     runtimeInfo?.defaultModel ? `default_model=${runtimeInfo.defaultModel}` : "",
+    contextStr,
     runtimeChannel ? `channel=${runtimeChannel}` : "",
     runtimeChannel
       ? `capabilities=${runtimeCapabilities.length > 0 ? runtimeCapabilities.join(",") : "none"}`

@@ -22,6 +22,8 @@ export type RuntimeInfoInput = {
   /** Supported message actions for the current channel (e.g., react, edit, unsend) */
   channelActions?: string[];
   repoRoot?: string;
+  /** Context window usage percentage (0-100). Shows how much of the context window is used. */
+  contextPercent?: number;
 };
 
 export type SystemPromptRuntimeParams = {

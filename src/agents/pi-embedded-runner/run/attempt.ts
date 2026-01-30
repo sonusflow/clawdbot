@@ -86,6 +86,60 @@ import { MAX_IMAGE_BYTES } from "../../../media/constants.js";
 import type { EmbeddedRunAttemptParams, EmbeddedRunAttemptResult } from "./types.js";
 import { detectAndLoadPromptImages } from "./images.js";
 
+/**
+ * Estimate current context window usage percentage from the session file.
+ * This reads the session JSONL to sum up token usage from all assistant messages,
+ * then calculates the percentage based on the model's context window.
+ *
+ * @param sessionFile - Path to the session JSONL file
+ * @param contextWindowTokens - The model's context window size in tokens
+ * @returns Context usage percentage (0-100), or undefined if unavailable
+ */
+export async function estimateContextPercent(
+  sessionFile: string,
+  contextWindowTokens: number | undefined,
+): Promise<number | undefined> {
+  if (!contextWindowTokens || contextWindowTokens <= 0) return undefined;
+
+  try {
+    const content = await fs.readFile(sessionFile, "utf8").catch(() => null);
+    if (!content) return undefined;
+
+    let totalTokens = 0;
+    for (const line of content.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const entry = JSON.parse(line);
+        // Look for message entries with assistant role and usage
+        if (entry?.type === "message" && entry?.message?.role === "assistant") {
+          const usage = entry.message.usage;
+          if (usage) {
+            // Sum input + output tokens (input represents context sent to model)
+            const input =
+              usage.input ?? usage.inputTokens ?? usage.input_tokens ?? usage.promptTokens ?? 0;
+            const output =
+              usage.output ??
+              usage.outputTokens ??
+              usage.output_tokens ??
+              usage.completionTokens ??
+              0;
+            totalTokens += (input > 0 ? input : 0) + (output > 0 ? output : 0);
+          }
+        }
+      } catch {
+        // Skip malformed lines
+      }
+    }
+
+    if (totalTokens <= 0) return undefined;
+
+    const percent = (totalTokens / contextWindowTokens) * 100;
+    return Math.min(100, Math.max(0, Math.round(percent)));
+  } catch {
+    return undefined;
+  }
+}
+
 export function injectHistoryImagesIntoMessages(
   messages: AgentMessage[],
   historyImagesByIndex: Map<number, ImageContent[]>,
@@ -307,6 +361,13 @@ export async function runEmbeddedAttempt(
       agentId: sessionAgentId,
     });
     const defaultModelLabel = `${defaultModelRef.provider}/${defaultModelRef.model}`;
+
+    // Estimate context window usage percentage from session history
+    const contextPercent = await estimateContextPercent(
+      params.sessionFile,
+      params.model.contextWindow,
+    );
+
     const { runtimeInfo, userTimezone, userTime, userTimeFormat } = buildSystemPromptParams({
       config: params.config,
       agentId: sessionAgentId,
@@ -322,6 +383,7 @@ export async function runEmbeddedAttempt(
         channel: runtimeChannel,
         capabilities: runtimeCapabilities,
         channelActions,
+        contextPercent,
       },
     });
     const isDefaultAgent = sessionAgentId === defaultAgentId;

@@ -27,9 +27,11 @@ export type MattermostWebSocketLike = {
   on(event: "message", listener: (data: WebSocket.RawData) => void | Promise<void>): void;
   on(event: "close", listener: (code: number, reason: Buffer) => void): void;
   on(event: "error", listener: (err: unknown) => void): void;
+  on(event: "pong", listener: () => void): void;
   send(data: string): void;
   close(): void;
   terminate(): void;
+  ping?(data?: unknown): void;
 };
 
 export type MattermostWebSocketFactory = (url: string) => MattermostWebSocketLike;
@@ -98,6 +100,10 @@ export function parsePostedEvent(
   return parsePostedPayload(payload);
 }
 
+// --- PATCH: WebSocket ping/pong keepalive ---
+const WS_PING_INTERVAL_MS = 30_000; // Send ping every 30s
+const WS_PONG_TIMEOUT_MS = 10_000; // Terminate if no pong within 10s
+
 export function createMattermostConnectOnce(
   opts: CreateMattermostConnectOnceOpts,
 ): () => Promise<void> {
@@ -106,6 +112,20 @@ export function createMattermostConnectOnce(
     const ws = webSocketFactory(opts.wsUrl);
     const onAbort = () => ws.terminate();
     opts.abortSignal?.addEventListener("abort", onAbort, { once: true });
+
+    let pingInterval: ReturnType<typeof setInterval> | null = null;
+    let pongTimeout: ReturnType<typeof setTimeout> | null = null;
+
+    const clearPingKeepAlive = () => {
+      if (pingInterval) {
+        clearInterval(pingInterval);
+        pingInterval = null;
+      }
+      if (pongTimeout) {
+        clearTimeout(pongTimeout);
+        pongTimeout = null;
+      }
+    };
 
     try {
       return await new Promise<void>((resolve, reject) => {
@@ -131,6 +151,7 @@ export function createMattermostConnectOnce(
           opts.statusSink?.({
             connected: true,
             lastConnectedAt: Date.now(),
+            lastEventAt: Date.now(),
             lastError: null,
           });
           ws.send(
@@ -140,6 +161,27 @@ export function createMattermostConnectOnce(
               data: { token: opts.botToken },
             }),
           );
+
+          // --- PATCH: Start ping keepalive after auth ---
+          pingInterval = setInterval(() => {
+            if (ws.ping) {
+              ws.ping();
+              pongTimeout = setTimeout(() => {
+                opts.runtime.error?.(
+                  "mattermost websocket pong timeout — terminating stale connection",
+                );
+                ws.terminate();
+              }, WS_PONG_TIMEOUT_MS);
+            }
+          }, WS_PING_INTERVAL_MS);
+        });
+
+        // --- PATCH: Clear pong timeout on pong received ---
+        ws.on("pong", () => {
+          if (pongTimeout) {
+            clearTimeout(pongTimeout);
+            pongTimeout = null;
+          }
         });
 
         ws.on("message", async (data) => {
@@ -150,6 +192,9 @@ export function createMattermostConnectOnce(
           } catch {
             return;
           }
+
+          // --- PATCH: Update lastEventAt on every WS event to prevent stale-socket restarts ---
+          opts.statusSink?.({ lastEventAt: Date.now() });
 
           if (payload.event === "reaction_added" || payload.event === "reaction_removed") {
             if (!opts.onReaction) {
@@ -178,6 +223,7 @@ export function createMattermostConnectOnce(
         });
 
         ws.on("close", (code, reason) => {
+          clearPingKeepAlive(); // PATCH: cleanup
           const message = reasonToString(reason);
           opts.statusSink?.({
             connected: false,
@@ -195,6 +241,7 @@ export function createMattermostConnectOnce(
         });
 
         ws.on("error", (err) => {
+          clearPingKeepAlive(); // PATCH: cleanup
           opts.runtime.error?.(`mattermost websocket error: ${String(err)}`);
           opts.statusSink?.({
             lastError: String(err),
@@ -205,6 +252,7 @@ export function createMattermostConnectOnce(
         });
       });
     } finally {
+      clearPingKeepAlive(); // PATCH: cleanup
       opts.abortSignal?.removeEventListener("abort", onAbort);
     }
   };
